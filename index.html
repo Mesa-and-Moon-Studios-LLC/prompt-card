@@ -255,9 +255,9 @@ function summarize(graph) {
     add(settings, "Length math", t === "ComfyMathExpression" ? i.expression : "");
     if (typeof i.image === "string" && !i.image.includes(",")) add(links, "Start image", i.image);
   }
-  const positive = texts.filter((t) => /positive|prompt/i.test(t[0]) || !/negative/i.test(t[0]));
   const negative = texts.filter((t) => /negative/i.test(t[0]));
-  const otherText = texts.filter((t) => !positive.includes(t) && !negative.includes(t));
+  const positive = texts.filter((t) => !negative.includes(t));
+  const otherText = [];
   return { positive, negative, otherText, models, settings, links };
 }
 
