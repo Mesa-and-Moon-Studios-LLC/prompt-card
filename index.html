@@ -1,0 +1,332 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Prompt card</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font: 16px/1.45 "Segoe UI", sans-serif;
+    background: #14120f;
+    color: #f3eadf;
+  }
+  header, main { max-width: 920px; margin: 0 auto; padding: 28px 20px; }
+  header { padding-bottom: 0; }
+  h1 { font-weight: 560; font-size: 28px; margin: 0 0 6px; }
+  p.lead { margin: 0; color: #cbbba8; }
+  #drop {
+    margin-top: 22px;
+    border: 1.5px dashed #8d7358;
+    border-radius: 16px;
+    min-height: 150px;
+    display: grid;
+    place-items: center;
+    text-align: center;
+    padding: 24px;
+    background: #1d1915;
+    cursor: pointer;
+  }
+  #drop.over { background: #2a221b; border-color: #e7c39a; }
+  #drop strong { display: block; font-size: 18px; margin-bottom: 4px; }
+  #drop span { color: #cbbba8; }
+  #file { display: none; }
+  #status { min-height: 1.4em; color: #e7c39a; margin: 14px 0; }
+  .card {
+    background: #1d1915;
+    border-radius: 16px;
+    padding: 16px 18px 8px;
+    margin: 0 0 16px;
+  }
+  .card h2 { margin: 0 0 8px; font-size: 13px; letter-spacing: .08em; text-transform: uppercase; color: #e7c39a; }
+  pre {
+    white-space: pre-wrap;
+    word-break: break-word;
+    margin: 0 0 12px;
+    font: 15px/1.45 ui-monospace, Consolas, monospace;
+  }
+  table { width: 100%; border-collapse: collapse; margin-bottom: 12px; }
+  td { padding: 6px 8px 6px 0; vertical-align: top; border-bottom: 1px solid #2d261f; }
+  td:first-child { color: #cbbba8; width: 180px; }
+  button.copy {
+    background: #3a2d22;
+    color: #f3eadf;
+    border: 0;
+    border-radius: 999px;
+    padding: 6px 12px;
+    margin: 0 0 12px;
+    cursor: pointer;
+  }
+  img.preview, video.preview {
+    max-width: 280px;
+    max-height: 360px;
+    border-radius: 12px;
+    display: block;
+    margin-bottom: 12px;
+  }
+  #empty { display: none; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Prompt card</h1>
+  <p class="lead">Drop a Comfy picture or clip. It stays in this browser and shows the prompt and settings saved inside the file. A joined clip, a silent copy, or a Grok clip has no Comfy graph, so this page will say so.</p>
+</header>
+<main>
+  <label id="drop">
+    <input id="file" type="file" accept="image/png,image/webp,image/jpeg,video/mp4,video/webm,.png,.webp,.jpg,.jpeg,.mp4,.webm">
+    <div><strong>Drop a PNG or MP4 here</strong><span>or click to choose one</span></div>
+  </label>
+  <p id="status"></p>
+  <div id="out"></div>
+</main>
+<script>
+const drop = document.getElementById("drop");
+const fileInput = document.getElementById("file");
+const statusEl = document.getElementById("status");
+const out = document.getElementById("out");
+
+drop.addEventListener("dragover", (e) => { e.preventDefault(); drop.classList.add("over"); });
+drop.addEventListener("dragleave", () => drop.classList.remove("over"));
+drop.addEventListener("drop", (e) => {
+  e.preventDefault();
+  drop.classList.remove("over");
+  if (e.dataTransfer.files[0]) readFile(e.dataTransfer.files[0]);
+});
+fileInput.addEventListener("change", () => {
+  if (fileInput.files[0]) readFile(fileInput.files[0]);
+});
+
+function readFile(file) {
+  statusEl.textContent = "Reading " + file.name + "…";
+  out.innerHTML = "";
+  const reader = new FileReader();
+  reader.onload = () => {
+    try { show(file, new Uint8Array(reader.result)); }
+    catch (err) { statusEl.textContent = "Could not read that file. " + err.message; }
+  };
+  reader.onerror = () => { statusEl.textContent = "The browser could not read that file."; };
+  reader.readAsArrayBuffer(file);
+}
+
+function show(file, bytes) {
+  const latin = latin1(bytes);
+  const graph = file.type.startsWith("video") || /\.mp4$|\.webm$/i.test(file.name)
+    ? graphFromVideo(latin)
+    : graphFromPng(bytes) || graphFromVideo(latin);
+  if (!graph) {
+    statusEl.textContent = file.name + " has no Comfy prompt in it.";
+    return;
+  }
+  const info = summarize(graph);
+  statusEl.textContent = file.name;
+  out.appendChild(render(file, info));
+}
+
+function latin1(bytes) {
+  let s = "";
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    s += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+  }
+  return s;
+}
+
+function graphFromPng(bytes) {
+  const chunks = pngText(bytes);
+  const raw = chunks.prompt || chunks.workflow;
+  if (!raw) return null;
+  try { return asGraph(JSON.parse(raw)); }
+  catch { return null; }
+}
+
+function pngText(bytes) {
+  const out = {};
+  let i = 8;
+  const dec = new TextDecoder();
+  while (i + 8 < bytes.length) {
+    const len = new DataView(bytes.buffer, bytes.byteOffset + i, 4).getUint32(0);
+    const type = dec.decode(bytes.subarray(i + 4, i + 8));
+    const data = bytes.subarray(i + 8, i + 8 + len);
+    if (type === "tEXt") {
+      const z = data.indexOf(0);
+      const key = dec.decode(data.subarray(0, z));
+      out[key] = dec.decode(data.subarray(z + 1));
+    } else if (type === "iTXt") {
+      const z = data.indexOf(0);
+      const key = dec.decode(data.subarray(0, z));
+      let p = z + 3;
+      const z2 = data.indexOf(0, p);
+      p = data.indexOf(0, z2 + 1) + 1;
+      out[key] = dec.decode(data.subarray(p));
+    }
+    if (type === "IEND") break;
+    i += 12 + len;
+  }
+  return out;
+}
+
+function graphFromVideo(text) {
+  const marker = text.lastIndexOf('"class_type"');
+  if (marker < 0) return null;
+  for (let i = marker; i >= 0; i--) {
+    if (text[i] !== "{") continue;
+    try {
+      const obj = JSON.parse(relax(text.slice(i)));
+      const graph = asGraph(obj);
+      if (graph) return graph;
+    } catch { /* keep walking */ }
+  }
+  return null;
+}
+
+function relax(s) {
+  // The graph sits in binary. Cut at the first place JSON.parse can close it
+  // by trying shrinking tails would be slow, so strip trailing junk after a
+  // balanced scan.
+  let depth = 0, inStr = false, esc = false;
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i];
+    if (inStr) {
+      if (esc) esc = false;
+      else if (c === "\\") esc = true;
+      else if (c === '"') inStr = false;
+      continue;
+    }
+    if (c === '"') inStr = true;
+    else if (c === "{") depth++;
+    else if (c === "}") {
+      depth--;
+      if (depth === 0) return s.slice(0, i + 1);
+    }
+  }
+  return s;
+}
+
+function asGraph(obj) {
+  if (!obj || typeof obj !== "object") return null;
+  if (obj.nodes && obj.prompt) return asGraph(obj.prompt);
+  const values = Object.values(obj);
+  if (values.some((v) => v && typeof v === "object" && v.class_type)) return obj;
+  return null;
+}
+
+function summarize(graph) {
+  const nodes = Object.entries(graph).map(([id, n]) => ({ id, ...n, inputs: n.inputs || {} }));
+  const texts = [];
+  const models = [];
+  const settings = [];
+  const links = [];
+  const seen = new Set();
+  function add(list, label, value) {
+    if (value === undefined || value === null || value === "") return;
+    const key = label + "|" + String(value);
+    if (seen.has(key)) return;
+    seen.add(key);
+    list.push([label, String(value)]);
+  }
+  for (const n of nodes) {
+    const t = n.class_type || "";
+    const i = n.inputs;
+    if (typeof i.text === "string" && i.text.trim() && !i.text.startsWith("##") && !/megapixel/i.test(i.text)) {
+      const title = (n._meta && n._meta.title) || t;
+      texts.push([title, unescape(i.text)]);
+    }
+    if (typeof i.prompt === "string" && i.prompt.trim()) texts.push(["Prompt", unescape(i.prompt)]);
+    add(models, "Checkpoint", i.ckpt_name);
+    add(models, "Model", i.unet_name);
+    add(models, "CLIP", i.clip_name ? i.clip_name + (i.type ? " (" + i.type + ")" : "") : "");
+    if (t === "VAELoader") add(models, "VAE", i.vae_name);
+    add(models, "LoRA", i.lora_name);
+    if (i.lora_name) {
+      add(models, "LoRA strength", [i.strength_model, i.strength_clip].filter((v) => v !== undefined).join(" model / ") + (i.strength_clip !== undefined ? " clip" : ""));
+    }
+    add(settings, "Steps", i.steps);
+    add(settings, "CFG", i.cfg);
+    add(settings, "Denoise", i.denoise);
+    add(settings, "Sampler", i.sampler_name);
+    add(settings, "Scheduler", i.scheduler);
+    add(settings, "Seed", i.seed ?? i.noise_seed);
+    add(settings, "Size", i.width && i.height && !Array.isArray(i.width) ? i.width + " × " + i.height : "");
+    add(settings, "FPS", i.fps);
+    add(settings, "Duration request", t === "PrimitiveFloat" ? i.value : "");
+    add(settings, "Length math", t === "ComfyMathExpression" ? i.expression : "");
+    if (typeof i.image === "string" && !i.image.includes(",")) add(links, "Start image", i.image);
+  }
+  const positive = texts.filter((t) => /positive|prompt/i.test(t[0]) || !/negative/i.test(t[0]));
+  const negative = texts.filter((t) => /negative/i.test(t[0]));
+  const otherText = texts.filter((t) => !positive.includes(t) && !negative.includes(t));
+  return { positive, negative, otherText, models, settings, links };
+}
+
+function unescape(s) { return s.replace(/\\n/g, "\n").replace(/\\"/g, '"'); }
+
+function render(file, info) {
+  const wrap = document.createElement("div");
+  const media = document.createElement("div");
+  media.className = "card";
+  const url = URL.createObjectURL(file);
+  if (file.type.startsWith("video") || /\.mp4$|\.webm$/i.test(file.name)) {
+    const v = document.createElement("video");
+    v.className = "preview"; v.controls = true; v.src = url;
+    media.appendChild(v);
+  } else {
+    const img = document.createElement("img");
+    img.className = "preview"; img.src = url; img.alt = "";
+    media.appendChild(img);
+  }
+  wrap.appendChild(media);
+  section(wrap, "Positive", info.positive, true);
+  section(wrap, "Negative", info.negative, true);
+  section(wrap, "Other text", info.otherText, true);
+  facts(wrap, "Model", info.models);
+  facts(wrap, "Settings", info.settings);
+  facts(wrap, "File", info.links);
+  if (!info.positive.length && !info.negative.length) {
+    const note = document.createElement("p");
+    note.id = "status";
+    note.textContent = "The file has a Comfy graph, but no positive or negative text was stored in it.";
+    wrap.appendChild(note);
+  }
+  return wrap;
+}
+
+function section(wrap, title, rows, copy) {
+  if (!rows.length) return;
+  const card = document.createElement("div");
+  card.className = "card";
+  card.innerHTML = "<h2>" + title + "</h2>";
+  for (const [label, text] of rows) {
+    const pre = document.createElement("pre");
+    pre.textContent = (rows.length > 1 ? label + "\n" : "") + text;
+    card.appendChild(pre);
+    if (copy) {
+      const b = document.createElement("button");
+      b.className = "copy"; b.type = "button"; b.textContent = "Copy";
+      b.addEventListener("click", () => navigator.clipboard.writeText(text));
+      card.appendChild(b);
+    }
+  }
+  wrap.appendChild(card);
+}
+
+function facts(wrap, title, rows) {
+  if (!rows.length) return;
+  const card = document.createElement("div");
+  card.className = "card";
+  const table = document.createElement("table");
+  card.innerHTML = "<h2>" + title + "</h2>";
+  for (const [k, v] of rows) {
+    const tr = document.createElement("tr");
+    const a = document.createElement("td"); a.textContent = k;
+    const b = document.createElement("td"); b.textContent = v;
+    tr.append(a, b); table.appendChild(tr);
+  }
+  card.appendChild(table);
+  wrap.appendChild(card);
+}
+</script>
+</body>
+</html>
